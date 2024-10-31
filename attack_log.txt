@@ -1,0 +1,20 @@
+October 30 2024 22:02:55 
+TXID: 41c7, Query: bar.example.com.
+Legitimate IPs: [NONE]
+Malicious IPs: [10.6.6.7]
+
+October 30 2024 22:02:55 
+TXID: e44f, Query: foo.example.com.
+Legitimate IPs: [NONE]
+Malicious IPs: [10.6.6.7, 10.6.6.6]
+
+October 30 2024 22:02:55 
+TXID: 4a78, Query: www.cs.uic.edu.
+Legitimate IPs: [NONE, 131.193.32.29]
+Malicious IPs: [10.6.6.7, 10.6.6.6, 10.6.6.8]
+
+October 30 2024 22:02:55 
+TXID: 5f1c, Query: davu.uic.edu.
+Legitimate IPs: [NONE, 131.193.32.29]
+Malicious IPs: [10.6.6.7, 10.6.6.6, 10.6.6.8, 10.107.139.121]
+

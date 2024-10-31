@@ -1,139 +1,134 @@
 import sys
 import scapy.all as scapy
-from datetime import datetime, timedelta
+import time
 from collections import defaultdict
 
+# Dictionary to track DNS responses per transaction ID
+dns_responses = defaultdict(list)
+# Lists to maintain identified legitimate and malicious IPs
+legitimate_ips_list = []
+malicious_ips_list = []
 
-# Get list of network interfaces available on the system
-ip = scapy.get_if_list()
-print(ip)
-
-# Default settings
-interface = "wlan0" 
-
-# Initialize a dictionary to track DNS responses for each domain and TxID
-dns_cache = defaultdict(list)
-cache_timeout = timedelta(minutes=5)  # Define a cache timeout for entries
-
-def handle_dns_packet(packet):
-    if scapy.DNS in packet:
-        dns_layer = packet[scapy.DNS]
-
-        packet.show()
-        if dns_layer.qr == 1:
-            txid = dns_layer.id
-            domain = dns_layer.qd.qname.decode().rstrip('.')
-
-
-            response_ips = []
-            ttl_value = None
-            src_ip = packet[scapy.IP].src
-
-            for i in range(dns_layer.ancount):
-                dns_response = dns_layer.an[i]
-                if isinstance(dns_response, scapy.DNSRR) and dns_response.type == 1:  # type of response and  A record (IPv4)
-                    response_ips.append(dns_response.rdata)
-                    ttl_value = dns_response.ttl
-            # Detect potential spoofing
-            # detect_spoofing(txid, domain, response_ips, ttl_value, src_ip, dns_layer)
-
-
-def detect_spoofing(txid, domain, response_ips, ttl_value, source_ip, dns_layer):
-    """Detects spoofing based on IP, TTL, and DNS flag mismatches for the same TxID and domain."""
-    # Cache cleanup: Remove entries older than cache_timeout
-    current_time = datetime.now()
-    dns_cache[(txid, domain)] = [(entry[0], entry[1], entry[2]) for entry in dns_cache[(txid, domain)]
-                                 if current_time - entry[2] < cache_timeout]
-
-    existing_responses = dns_cache[(txid, domain)]
+# Function to log detected attacks for multiple queries to a file
+def log_dns_attacks(detected_attacks):
+    # Timestamp each log entry with the current date and time
+    log_entry = f"{time.strftime('%B %d %Y %H:%M:%S')} \n"
     
-    # Extract DNS flags and counts
-    answer_count = dns_layer.ancount
-    ns_count = dns_layer.nscount
-    is_authoritative = dns_layer.aa  # Authoritative Answer flag
-
-    print(answer_count,ns_count,is_authoritative)
-
-    # Check for suspicious flag combinations
-    if (answer_count == 0 and is_authoritative == 1 and ns_count == 1) or \
-       (answer_count > 0 and is_authoritative == 1 and ns_count > 0):
+    # Process each detected attack to format the output
+    for tx_id, query, malicious_ips, legitimate_ips in detected_attacks:
+        # Convert "0" IPs to "NONE" for both legitimate and malicious IP lists
+        legitimate_ips = ["NONE" if ip == '0' else ip for ip in legitimate_ips]
+        malicious_ips = ["NONE" if ip == '0' else ip for ip in malicious_ips]
         
-        print("here")
-        # Flag as spoofed if these flag combinations are present
-        log_attack(txid, domain, [], response_ips, ttl_value, [source_ip])
-        print(f"[ALERT] Suspicious DNS flag combination detected for {domain} with TXID {txid}. Check 'answer.txt' for details.")
-        return  # Exit early since we've detected a spoofed response
+        # Format the log entry with the transaction ID, query, and detected IPs
+        log_entry += (
+            f"TXID: {tx_id:x}, Query: {query}\n"
+            f"Legitimate IPs: [{', '.join(legitimate_ips)}]\n"
+            f"Malicious IPs: [{', '.join(malicious_ips)}]\n\n"
+        )
+    
+    # Append each log entry to the attack_log.txt file
+    with open("attack_log.txt", "a") as f:
+        f.write(log_entry)
 
-    # Check for TTL consistency across responses for the same domain and TxID
-    if existing_responses:
-        legit_ips, legit_ttl, legit_source_ip = existing_responses[0]
+# Function to inspect each DNS packet for spoofing attacks
+def inspect_dns(packet):
+    detected_attacks = []  # List to store detected attacks for batch logging
 
-        # Check for IP or TTL mismatches
-        if set(response_ips) != set(legit_ips) or ttl_value != legit_ttl:
-            spoofed_ips = response_ips
-            source_ips = [source_ip, legit_source_ip]  # List of detected source IPs
-            # Log potential DNS poisoning
-            log_attack(txid, domain, legit_ips, spoofed_ips, ttl_value, source_ips)
-            print(f"[ALERT] DNS Spoofing detected for {domain} with TXID {txid}. Check 'attack.txt' for details.")
-    else:
-        # No previous response, treat this as the first legitimate response
-        dns_cache[(txid, domain)].append((response_ips, ttl_value, source_ip))
-        print(dns_cache)
+    # Check if the packet is a DNS response
+    if packet.haslayer(scapy.DNS) and packet[scapy.DNS].qr == 1:
+        # Extract transaction ID, query name, and response IP
+        dns_id = packet[scapy.DNS].id
+        query_name = packet[scapy.DNS].qd.qname.decode() if packet[scapy.DNS].qd else None
+        response_ip = packet[scapy.DNSRR].rdata if scapy.DNSRR in packet else '0'
 
+        # Drop packet if the response IP is already identified as malicious
+        if response_ip in malicious_ips_list:
+            print(f"Malicious IP {response_ip} detected. Dropping packet.")
+            return  # Exit function to drop packet
 
+        # Track responses for each transaction ID
+        if response_ip:
+            dns_responses[dns_id].append(response_ip)
 
+        # Process responses based on the count of responses for this transaction ID
+        response_count = len(dns_responses[dns_id])
 
+        if response_count == 1:
+            # If only one response, mark it as legitimate
+            legitimate_ips = []
+            for ip in dns_responses[dns_id]:
+                legitimate_ips.append("NONE" if ip == '0' else ip)
+            print(f"Single response detected. Trusted IPs: {legitimate_ips}")
 
-def log_attack(txid, domain, legit_ips, spoofed_ips, spoofed_ttl, src_ips):
-    """Logs a DNS poisoning attack to a file."""
+        elif response_count == 2:
+            # For two responses, trust the first as legitimate and flag the second as malicious
+            legitimate_ips = ["NONE" if dns_responses[dns_id][0] == '0' else dns_responses[dns_id][0]]
+            malicious_ips = [ip for ip in dns_responses[dns_id] if ip != legitimate_ips[0]]
 
-    print("logging")
-    with open('attack_log.txt', 'a') as f:
-        f.write(f"\n{datetime.now().strftime('%B %d %Y %H:%M:%S')}\n")
-        f.write(f"TXID 0x{txid:04x} Request {domain}\n")
-        f.write(f"Answer1 [Legitimate IPs: {', '.join(legit_ips)}]\n")
-        f.write(f"Answer2 [Spoofed IPs: {', '.join(spoofed_ips)}]\n")
-        f.write(f"Spoofed TTL: {spoofed_ttl}\n")
-        f.write("-" * 50 + "\n")
+            # Log if any malicious IPs are detected
+            if malicious_ips:
+                detected_attacks.append((dns_id, query_name, malicious_ips, legitimate_ips))
 
-# Function to load the hostname file if provided
-def load_tracefile(tracefile):
-    """
-    Loads a hostname file containing IP-hostname pairs.
-    """
-    print(f"Reading packets from tracefile {tracefile} for DNS poisoning detection...")
-    packets = scapy.rdpcap(tracefile)
-    for packet in packets:
-        handle_dns_packet(packet)
-        # pass
+        elif response_count > 2:
+            # If more than two responses, identify the most and least common IPs
+            ip_count = {ip: dns_responses[dns_id].count(ip) for ip in dns_responses[dns_id]}
+            max_count = max(ip_count.values())
+            legitimate_ips = [ip for ip, count in ip_count.items() if count == 1 and ip not in legitimate_ips_list]
+            malicious_ips = [ip for ip, count in ip_count.items() if count == max_count and ip not in malicious_ips_list]
 
-# Function to start sniffing packets from an interface
-def sniff_interface(interface):
-    print(f"Sniffing on interface {interface} for DNS poisoning detection...")
-    scapy.sniff(iface=interface, filter="ip and udp port 53", prn=handle_dns_packet)
+            # Ensure legitimate and malicious IP lists are exclusive
+            malicious_ips = [ip for ip in malicious_ips if ip not in legitimate_ips]
 
+            # Log detected attacks if malicious IPs are present
+            if malicious_ips:
+                legitimate_ips_list.extend([ip for ip in legitimate_ips if ip not in legitimate_ips_list])
+                malicious_ips_list.extend([ip for ip in malicious_ips if ip not in malicious_ips_list])
+                detected_attacks.append((dns_id, query_name, malicious_ips_list, legitimate_ips_list))
 
-def parse_args():
-    """
-    Parses command-line arguments to get the network interface to sniff on and the hostname file.
-    """
-    global interface
+            # Clear responses after processing for the current transaction ID
+            del dns_responses[dns_id]
 
-    if len(sys.argv) > 3 or len(sys.argv) > 5:
-        print("Usage: dnsinjector.py [-i interface] [-h hostnames]")
-        sys.exit(1)
-    if "-r" not in sys.argv:
-        sniff_interface(interface)
-    else:
-        for i in range(1, len(sys.argv)):
-            if sys.argv[i] == "-i":  # Interface argument
-                interface = sys.argv[i + 1]
-            elif sys.argv[i] == "-r":  # Hostname file argument
-                trace_file = sys.argv[i + 1]
-                load_tracefile(trace_file)
+    # Log all detected attacks in one batch
+    if detected_attacks:
+        log_dns_attacks(detected_attacks)
 
-
-# Main program entry point
+# Main program to handle command-line inputs and initialize sniffing
 if __name__ == "__main__":
-    dns_cache.clear()
-    parse_args()
+    # Default interface and tracefile
+    interface = "en0"
+    tracefile = None
+
+    # Parse command-line arguments
+    for i in range(1, len(sys.argv)):
+        if sys.argv[i] == "-i" and i + 1 < len(sys.argv):
+            interface = sys.argv[i + 1]
+        elif sys.argv[i] == "-r" and i + 1 < len(sys.argv):
+            tracefile = sys.argv[i + 1]
+
+    # Use the first available network interface if none specified
+    if interface is None:
+        available_interfaces = scapy.get_if_list()
+        if available_interfaces:
+            interface = available_interfaces[0]
+        else:
+            print("No network interface found.")
+            sys.exit(1)
+
+    print(f"Running DNS spoof detection on interface: {interface}")
+
+    # If a tracefile is specified, analyze packets from the file
+    if tracefile:
+        print(f"Analyzing packets from trace file: {tracefile}")
+        scapy.sniff(offline=tracefile, prn=inspect_dns, store=False)
+        print("Finished processing trace file. Starting live sniffing...")
+
+    # Begin live sniffing if no tracefile or after tracefile analysis
+    else: 
+        local_ip = scapy.get_if_addr(interface)
+        scapy.sniff(
+            iface=interface,
+            filter=f"udp port 53 and ip",
+            prn=inspect_dns,
+            store=False
+        )
