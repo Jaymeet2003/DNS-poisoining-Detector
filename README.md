@@ -7,7 +7,7 @@ This tool is designed to sniff DNS traffic on a specified network interface and 
 **Disclaimer**: This code is for educational and security research purposes only. Unauthorized use is illegal and unethical.
 
 ## Prerequisites
-- Python 3.x
+- Python 3.5 or above
 - Scapy library (install with `pip install scapy`)
 
 ## Usage
